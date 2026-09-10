@@ -49,3 +49,6 @@ if uploaded_file is not None:
 
         else:
             st.info("No defect detected.")
+            st.markdown("---")
+            st.write("👨‍💻 Developed by Subham Sahu")
+            st.write("B.Tech 4th Year | Metallurgy Engineering")
