@@ -1,2233 +1,498 @@
-# ================================================================
-# CONTINUOUS CASTING BILLET DEFECT DETECTOR
-# ONE COMPLETE COLAB CODE
-# ================================================================
-#
-# Developed by: Subham Sahu
-# Registration No.: 2301105744
-# Branch: Metallurgical & Materials Engineering
-# College: Indira Gandhi Institute of Technology (IGIT), Sarang
-#
-# Core trained classes:
-# 1. Scratch
-# 2. Weld slag
-# 3. Cutting opening
-# 4. Water slag mark
-# 5. Slag skin
-# 6. Longitudinal crack
-#
-# IMPORTANT:
-# This system reports REAL model performance from an unseen test set.
-# Model confidence is NOT the same as accuracy/probability.
-# It does not claim to detect untrained, microscopic or internal defects.
-# ================================================================
-
-
-# ================================================================
-# 1. INSTALL LIBRARIES
-# ================================================================
-
-
-
-
-# ================================================================
-# 2. IMPORTS
-# ================================================================
+# ============================================================
+# CONTINUOUS CASTING BILLET DEFECT INSPECTOR
+# Developed by Subham Sahu
+# ============================================================
 
 import os
-import shutil
-import zipfile
-import random
-from pathlib import Path
-
-import cv2
-import numpy as np
-import pandas as pd
-import yaml
-
-from PIL import Image
-
-from ultralytics import YOLO
-
-
-# ================================================================
-# 3. UPLOAD YOUR CASTING BILLET DATASET
-# ================================================================
-
-
-
-
-
-
-
-
-
-# ================================================================
-# 4. EXTRACT DATASET
-# ================================================================
-
-SOURCE_DIR = Path("/content/casting_source")
-
-if SOURCE_DIR.exists():
-    shutil.rmtree(SOURCE_DIR)
-
-SOURCE_DIR.mkdir(parents=True)
-
-with zipfile.ZipFile(ZIP_FILE, "r") as z:
-    z.extractall(SOURCE_DIR)
-
-print("Dataset extracted successfully.")
-
-
-# ================================================================
-# 5. FIND ORIGINAL DATASET FOLDERS
-# ================================================================
-
-def find_folder(root, folder_name):
-
-    for p in root.rglob("*"):
-        if p.is_dir() and p.name.lower() == folder_name.lower():
-            return p
-
-    return None
-
-
-IMAGE_DIR = find_folder(
-    SOURCE_DIR,
-    "images"
-)
-
-LABEL_DIR = find_folder(
-    SOURCE_DIR,
-    "labels"
-)
-
-MASK_DIR = find_folder(
-    SOURCE_DIR,
-    "mask"
-)
-
-CLASS_FILE = None
-
-for p in SOURCE_DIR.rglob("classes.txt"):
-    CLASS_FILE = p
-    break
-
-
-print("\nDataset structure:")
-print("Images :", IMAGE_DIR)
-print("Labels :", LABEL_DIR)
-print("Masks  :", MASK_DIR)
-print("Classes:", CLASS_FILE)
-
-
-if IMAGE_DIR is None:
-    raise RuntimeError(
-        "The ZIP does not contain an images folder."
-    )
-
-if LABEL_DIR is None:
-    raise RuntimeError(
-        "The ZIP does not contain a labels folder."
-    )
-
-
-# ================================================================
-# 6. READ CLASS NAMES
-# ================================================================
-
-EXPECTED_CLASSES = [
-    "scratch",
-    "weld slag",
-    "cutting opening",
-    "water slag mark",
-    "slag skin",
-    "longitudinal crack"
-]
-
-classes = EXPECTED_CLASSES.copy()
-
-if CLASS_FILE is not None:
-
-    try:
-
-        with open(
-            CLASS_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            loaded = [
-                line.strip()
-                for line in f
-                if line.strip()
-            ]
-
-        if len(loaded) == len(EXPECTED_CLASSES):
-            classes = loaded
-
-    except Exception:
-        classes = EXPECTED_CLASSES.copy()
-
-
-print("\nClasses used by the model:")
-
-for i, name in enumerate(classes):
-    print(i, "=", name)
-
-
-# ================================================================
-# 7. FIND IMAGES
-# ================================================================
-
-IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp"
-}
-
-all_images = []
-
-for p in IMAGE_DIR.rglob("*"):
-
-    if (
-        p.is_file()
-        and p.suffix.lower() in IMAGE_EXTENSIONS
-    ):
-        all_images.append(p)
-
-
-print(
-    "\nImages found:",
-    len(all_images)
-)
-
-if not all_images:
-    raise RuntimeError(
-        "No images were found."
-    )
-
-
-# ================================================================
-# 8. MATCH IMAGES WITH LABELS
-# ================================================================
-
-def get_label(image_path):
-
-    stem = image_path.stem
-
-    direct = LABEL_DIR / f"{stem}.txt"
-
-    if direct.exists():
-        return direct
-
-    matches = list(
-        LABEL_DIR.rglob(
-            f"{stem}.txt"
-        )
-    )
-
-    if matches:
-        return matches[0]
-
-    return None
-
-
-pairs = []
-
-missing = []
-
-for image_path in all_images:
-
-    label_path = get_label(
-        image_path
-    )
-
-    if label_path is None:
-
-        missing.append(
-            image_path
-        )
-
-    else:
-
-        pairs.append(
-            (
-                image_path,
-                label_path
-            )
-        )
-
-
-print(
-    "Image-label pairs:",
-    len(pairs)
-)
-
-print(
-    "Missing labels:",
-    len(missing)
-)
-
-
-if not pairs:
-    raise RuntimeError(
-        "No image-label pairs were found."
-    )
-
-
-# ================================================================
-# 9. VALIDATE LABELS
-# ================================================================
-
-def check_label(label_path):
-
-    try:
-
-        with open(
-            label_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            lines = [
-                x.strip()
-                for x in f
-                if x.strip()
-            ]
-
-        if not lines:
-            return False
-
-        for line in lines:
-
-            parts = line.split()
-
-            if len(parts) < 5:
-                return False
-
-            class_id = int(
-                float(parts[0])
-            )
-
-            if (
-                class_id < 0
-                or class_id >= len(classes)
-            ):
-                return False
-
-            values = [
-                float(x)
-                for x in parts[1:]
-            ]
-
-            # Detection label:
-            # class x y width height
-            if len(values) == 4:
-
-                if not all(
-                    0 <= x <= 1
-                    for x in values
-                ):
-                    return False
-
-            # Segmentation label:
-            # class x1 y1 x2 y2 ...
-            elif len(values) >= 6:
-
-                if len(values) % 2 != 0:
-                    return False
-
-                if not all(
-                    0 <= x <= 1
-                    for x in values
-                ):
-                    return False
-
-            else:
-                return False
-
-        return True
-
-    except Exception:
-
-        return False
-
-
-valid_pairs = []
-
-invalid_pairs = []
-
-for image_path, label_path in pairs:
-
-    if check_label(label_path):
-
-        valid_pairs.append(
-            (
-                image_path,
-                label_path
-            )
-        )
-
-    else:
-
-        invalid_pairs.append(
-            (
-                image_path,
-                label_path
-            )
-        )
-
-
-print(
-    "\nValid labelled images:",
-    len(valid_pairs)
-)
-
-print(
-    "Invalid labelled images:",
-    len(invalid_pairs)
-)
-
-
-if not valid_pairs:
-    raise RuntimeError(
-        "No valid labelled images remain."
-    )
-
-
-# ================================================================
-# 10. DETERMINE DETECTION / SEGMENTATION
-# ================================================================
-
-segmentation_count = 0
-detection_count = 0
-
-for _, label_path in valid_pairs:
-
-    with open(
-        label_path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        lines = [
-            x.strip()
-            for x in f
-            if x.strip()
-        ]
-
-    for line in lines:
-
-        number_of_values = len(
-            line.split()
-        ) - 1
-
-        if number_of_values == 4:
-            detection_count += 1
-
-        elif number_of_values >= 6:
-            segmentation_count += 1
-
-
-USE_SEGMENTATION = (
-    segmentation_count > 0
-    and detection_count == 0
-)
-
-
-if USE_SEGMENTATION:
-
-    MODEL_NAME = "yolo26n-seg.pt"
-
-    print(
-        "\nTraining mode: INSTANCE SEGMENTATION"
-    )
-
-else:
-
-    MODEL_NAME = "yolo26n.pt"
-
-    print(
-        "\nTraining mode: OBJECT DETECTION"
-    )
-
-    print(
-        "Existing detection annotations will be used."
-    )
-
-
-# ================================================================
-# 11. CREATE CLEAN DATASET
-# ================================================================
-
-FINAL_DATASET = Path(
-    "/content/billet_dataset"
-)
-
-if FINAL_DATASET.exists():
-    shutil.rmtree(
-        FINAL_DATASET
-    )
-
-
-for split in [
-    "train",
-    "val",
-    "test"
-]:
-
-    (
-        FINAL_DATASET
-        / "images"
-        / split
-    ).mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    (
-        FINAL_DATASET
-        / "labels"
-        / split
-    ).mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-# ================================================================
-# 12. SPLIT DATA
-# ================================================================
-
-random.seed(42)
-
-random.shuffle(
-    valid_pairs
-)
-
-total = len(valid_pairs)
-
-train_end = int(
-    total * 0.70
-)
-
-val_end = int(
-    total * 0.85
-)
-
-train_pairs = valid_pairs[
-    :train_end
-]
-
-val_pairs = valid_pairs[
-    train_end:val_end
-]
-
-test_pairs = valid_pairs[
-    val_end:
-]
-
-
-print("\nDataset split:")
-print("Train:", len(train_pairs))
-print("Validation:", len(val_pairs))
-print("Test:", len(test_pairs))
-
-
-# ================================================================
-# 13. COPY DATA
-# ================================================================
-
-def copy_split(
-    pair_list,
-    split
-):
-
-    for i, (
-        image_path,
-        label_path
-    ) in enumerate(pair_list):
-
-        image_name = (
-            f"{i:06d}"
-            + image_path.suffix.lower()
-        )
-
-        label_name = (
-            f"{i:06d}.txt"
-        )
-
-        shutil.copy2(
-            image_path,
-            FINAL_DATASET
-            / "images"
-            / split
-            / image_name
-        )
-
-        shutil.copy2(
-            label_path,
-            FINAL_DATASET
-            / "labels"
-            / split
-            / label_name
-        )
-
-
-copy_split(
-    train_pairs,
-    "train"
-)
-
-copy_split(
-    val_pairs,
-    "val"
-)
-
-copy_split(
-    test_pairs,
-    "test"
-)
-
-
-# ================================================================
-# 14. CREATE DATASET YAML
-# ================================================================
-
-DATA_YAML = (
-    FINAL_DATASET
-    / "dataset.yaml"
-)
-
-dataset_yaml = {
-
-    "path": str(
-        FINAL_DATASET
-    ),
-
-    "train": "images/train",
-
-    "val": "images/val",
-
-    "test": "images/test",
-
-    "names": {
-        i: name
-        for i, name in enumerate(classes)
-    }
-}
-
-
-with open(
-    DATA_YAML,
-    "w",
-    encoding="utf-8"
-) as f:
-
-    yaml.safe_dump(
-        dataset_yaml,
-        f,
-        sort_keys=False,
-        allow_unicode=True
-    )
-
-
-# ================================================================
-# 15. TRAIN MODEL
-# ================================================================
-
-print("\n")
-print("=" * 70)
-print("STARTING MODEL TRAINING")
-print("=" * 70)
-
-model = YOLO(
-    MODEL_NAME
-)
-
-
-model.train(
-
-    data=str(
-        DATA_YAML
-    ),
-
-    epochs=80,
-
-    imgsz=960,
-
-    batch=8,
-
-    patience=20,
-
-    pretrained=True,
-
-    device=0,
-
-    workers=2,
-
-    optimizer="auto",
-
-    cos_lr=True,
-
-    close_mosaic=10,
-
-    degrees=0.0,
-
-    translate=0.10,
-
-    scale=0.40,
-
-    fliplr=0.50,
-
-    flipud=0.0,
-
-    hsv_h=0.015,
-
-    hsv_s=0.30,
-
-    hsv_v=0.20,
-
-    project="/content/billet_training",
-
-    name="billet_defect_model",
-
-    exist_ok=True,
-
-    verbose=True
-)
-
-
-# ================================================================
-# 16. LOAD BEST MODEL
-# ================================================================
-
-BEST_MODEL = (
-    Path("/content/billet_training")
-    / "billet_defect_model"
-    / "weights"
-    / "best.pt"
-)
-
-
-if not BEST_MODEL.exists():
-
-    raise RuntimeError(
-        "Training completed but best.pt was not found."
-    )
-
-
-best_model = YOLO(
-    str(BEST_MODEL)
-)
-
-
-# ================================================================
-# 17. FINAL UNSEEN TEST
-# ================================================================
-
-print("\n")
-print("=" * 70)
-print("FINAL UNSEEN TEST SET")
-print("=" * 70)
-
-
-metrics = best_model.val(
-
-    data=str(
-        DATA_YAML
-    ),
-
-    split="test",
-
-    imgsz=960,
-
-    batch=8,
-
-    device=0,
-
-    plots=True,
-
-    verbose=True
-)
-
-
-# ================================================================
-# 18. PERFORMANCE REPORT
-# ================================================================
-
-print("\n")
-print("=" * 70)
-print("REAL TEST PERFORMANCE")
-print("=" * 70)
-
-
-try:
-
-    precision = float(
-        metrics.box.mp
-    )
-
-    recall = float(
-        metrics.box.mr
-    )
-
-    map50 = float(
-        metrics.box.map50
-    )
-
-    map5095 = float(
-        metrics.box.map
-    )
-
-    if (
-        precision + recall
-        > 0
-    ):
-
-        f1 = (
-            2
-            * precision
-            * recall
-            / (
-                precision
-                + recall
-            )
-        )
-
-    else:
-
-        f1 = 0
-
-
-    print(
-        f"Precision : {precision:.4f}"
-    )
-
-    print(
-        f"Recall    : {recall:.4f}"
-    )
-
-    print(
-        f"F1 Score  : {f1:.4f}"
-    )
-
-    print(
-        f"mAP@50    : {map50:.4f}"
-    )
-
-    print(
-        f"mAP@50-95 : {map5095:.4f}"
-    )
-
-
-except Exception as error:
-
-    print(
-        "Could not extract metrics:",
-        error
-    )
-
-
-# ================================================================
-# 19. PER-CLASS PERFORMANCE
-# ================================================================
-
-print("\n")
-print("=" * 70)
-print("PER-CLASS PERFORMANCE")
-print("=" * 70)
-
-
-try:
-
-    for class_id, class_name in (
-        best_model.names.items()
-    ):
-
-        try:
-
-            p = float(
-                metrics.box.p[class_id]
-            )
-
-            r = float(
-                metrics.box.r[class_id]
-            )
-
-            ap50 = float(
-                metrics.box.ap50[class_id]
-            )
-
-            ap = float(
-                metrics.box.ap[class_id]
-            )
-
-            if p + r > 0:
-
-                class_f1 = (
-                    2 * p * r
-                    / (p + r)
-                )
-
-            else:
-
-                class_f1 = 0
-
-
-            print(
-                f"\n{class_name}"
-            )
-
-            print(
-                f"  Precision : {p:.4f}"
-            )
-
-            print(
-                f"  Recall    : {r:.4f}"
-            )
-
-            print(
-                f"  F1        : {class_f1:.4f}"
-            )
-
-            print(
-                f"  AP50      : {ap50:.4f}"
-            )
-
-            print(
-                f"  AP50-95   : {ap:.4f}"
-            )
-
-        except Exception:
-            pass
-
-
-except Exception as error:
-
-    print(
-        "Per-class metrics unavailable:",
-        error
-    )
-
-
-# ================================================================
-# 20. SAVE FINAL MODEL
-# ================================================================
-
-FINAL_MODEL = Path(
-    "/content/best_billet_defect_model.pt"
-)
-
-shutil.copy2(
-    BEST_MODEL,
-    FINAL_MODEL
-)
-
-
-# ================================================================
-# 21. CREATE STREAMLIT APP
-# ================================================================
-
-APP_CODE = r'''
 import streamlit as st
-
+from PIL import Image
 from ultralytics import YOLO
 
-from PIL import Image
 
-import numpy as np
-import pandas as pd
-
-import cv2
-import io
-
-from datetime import datetime
-
-
-# ==========================================================
-# PAGE
-# ==========================================================
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
-    page_title="Billet Defect Inspector",
+    page_title="Continuous Casting Billet Defect Inspector",
     page_icon="🔍",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
-# ==========================================================
-# MODEL
-# ==========================================================
+# ============================================================
+# PERSONAL / PROJECT INFORMATION
+# ============================================================
 
-MODEL_PATH = (
-    "best_billet_defect_model.pt"
+NAME = "Subham Sahu"
+
+REGISTRATION_NO = "2301105744"
+
+BRANCH = "Metallurgical & Materials Engineering"
+
+COLLEGE = "Indira Gandhi Institute of Technology (IGIT), Sarang"
+
+
+# ============================================================
+# MODEL PATH
+# ============================================================
+
+MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "best.pt"
 )
 
 
-CLASS_NAMES = [
-    "scratch",
-    "weld slag",
-    "cutting opening",
-    "water slag mark",
-    "slag skin",
-    "longitudinal crack"
-]
-
+# ============================================================
+# LOAD YOLO MODEL
+# ============================================================
 
 @st.cache_resource
 def load_model():
+    return YOLO(MODEL_PATH)
 
-    return YOLO(
-        MODEL_PATH
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+
+    st.header("👨‍🎓 Developed By")
+
+    st.write(f"**Name:** {NAME}")
+
+    st.write(f"**Registration No.:** {REGISTRATION_NO}")
+
+    st.write(f"**Branch:** {BRANCH}")
+
+    st.write(f"**College:** {COLLEGE}")
+
+    st.divider()
+
+    st.header("⚙️ Inspection Settings")
+
+    confidence = st.slider(
+        "Confidence Threshold",
+        min_value=0.05,
+        max_value=0.95,
+        value=0.25,
+        step=0.05
     )
 
+    iou = st.slider(
+        "IoU Threshold",
+        min_value=0.10,
+        max_value=0.90,
+        value=0.45,
+        step=0.05
+    )
 
-model = load_model()
+    st.divider()
+
+    st.header("📋 Trained Defect Classes")
+
+    st.write("1. Scratch")
+    st.write("2. Weld slag")
+    st.write("3. Cutting opening")
+    st.write("4. Water slag mark")
+    st.write("5. Slag skin")
+    st.write("6. Longitudinal crack")
 
 
-# ==========================================================
-# SIDEBAR — PERSONAL DETAILS
-# ==========================================================
+# ============================================================
+# MAIN TITLE
+# ============================================================
 
-st.sidebar.title(
-    "👨‍💻 Developed by"
+st.title("🔍 Continuous Casting Billet Defect Inspector")
+
+st.subheader(
+    "AI-Based Surface Defect Inspection for Continuous-Casting Billets"
 )
-
-st.sidebar.markdown(
-    """
-**Subham Sahu**
-
-**Registration No.:** 2301105744
-
-**Branch:** Metallurgical & Materials Engineering
-
-**College:** Indira Gandhi Institute of Technology (IGIT), Sarang
-"""
-)
-
-
-st.sidebar.divider()
-
-
-# ==========================================================
-# SIDEBAR — SETTINGS
-# ==========================================================
-
-st.sidebar.subheader(
-    "⚙ Inspection Settings"
-)
-
-
-CONFIDENCE = st.sidebar.slider(
-    "Minimum model confidence",
-    0.05,
-    0.95,
-    0.25,
-    0.05
-)
-
-
-IOU = st.sidebar.slider(
-    "IoU threshold",
-    0.10,
-    0.90,
-    0.50,
-    0.05
-)
-
-
-TILE_SIZE = st.sidebar.selectbox(
-    "High-resolution tile size",
-    [640, 768, 960, 1280],
-    index=2
-)
-
-
-OVERLAP = st.sidebar.slider(
-    "Tile overlap",
-    0.10,
-    0.50,
-    0.20,
-    0.05
-)
-
-
-USE_TILED = st.sidebar.checkbox(
-    "High-resolution inspection",
-    True
-)
-
-
-# ==========================================================
-# MAIN PAGE
-# ==========================================================
-
-st.title(
-    "🔍 Continuous Casting Billet Defect Inspector"
-)
-
 
 st.write(
-    "AI-assisted surface inspection of continuous-casting "
-    "billets using the trained defect-detection model."
+    "Upload a billet surface image or use your camera "
+    "to inspect the billet for trained surface defects."
 )
 
 
-st.info(
-    "Model confidence is a model score, not a certified "
-    "probability or accuracy."
+# ============================================================
+# CHECK BEST.PT
+# ============================================================
+
+if not os.path.isfile(MODEL_PATH):
+
+    st.error("❌ YOLO model 'best.pt' was not found.")
+
+    st.info(
+        "Please place best.pt in the same GitHub folder as app.py."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
+
+try:
+
+    model = load_model()
+
+except Exception as error:
+
+    st.error("❌ Failed to load the YOLO model.")
+
+    st.code(str(error))
+
+    st.stop()
+
+
+# ============================================================
+# INPUT METHOD
+# ============================================================
+
+st.divider()
+
+st.header("📷 Billet Inspection")
+
+input_method = st.radio(
+    "Select inspection method:",
+    [
+        "📁 Upload Image",
+        "📷 Camera"
+    ],
+    horizontal=True
 )
 
 
-# ==========================================================
+image = None
+
+
+# ============================================================
 # IMAGE UPLOAD
-# ==========================================================
+# ============================================================
 
-uploaded_file = st.file_uploader(
-    "Upload Billet Surface Image",
-    type=[
-        "jpg",
-        "jpeg",
-        "png",
-        "bmp",
-        "tif",
-        "tiff",
-        "webp"
-    ]
-)
+if input_method == "📁 Upload Image":
 
-# ==========================================================
-# CAMERA INPUT - NEW FEATURE
-# ==========================================================
+    uploaded_file = st.file_uploader(
+        "Upload Billet Surface Image",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "bmp"
+        ],
+        help="Upload a clear billet surface image."
+    )
 
-st.subheader("📷 Camera Inspection")
+    if uploaded_file is not None:
 
-camera_file = st.camera_input(
-    "Take a picture of the billet surface"
-)
+        try:
 
-if camera_file is not None:
+            image = Image.open(
+                uploaded_file
+            ).convert("RGB")
 
-    camera_image = Image.open(
-        camera_file
-    ).convert("RGB")
+        except Exception as error:
+
+            st.error("❌ Could not read the uploaded image.")
+
+            st.code(str(error))
+
+
+# ============================================================
+# CAMERA INPUT
+# ============================================================
+
+elif input_method == "📷 Camera":
+
+    camera_file = st.camera_input(
+        "📷 Take a photograph of the billet surface"
+    )
+
+    if camera_file is not None:
+
+        try:
+
+            image = Image.open(
+                camera_file
+            ).convert("RGB")
+
+        except Exception as error:
+
+            st.error("❌ Could not read the camera image.")
+
+            st.code(str(error))
+
+
+# ============================================================
+# SHOW INPUT IMAGE
+# ============================================================
+
+if image is not None:
+
+    st.divider()
+
+    st.header("🖼️ Inspection Image")
 
     st.image(
-        camera_image,
-        caption="Captured Billet Image",
-        use_container_width=True
+        image,
+        caption="Billet surface image",
+        width="stretch"
     )
 
-    if st.button(
-        "📷 Run Camera Inspection",
-        type="primary"
-    ):
+
+    # ========================================================
+    # INSPECT BUTTON
+    # ========================================================
+
+    inspect_button = st.button(
+        "🔍 Inspect Billet",
+        type="primary",
+        width="stretch"
+    )
+
+
+    if inspect_button:
+
+        st.divider()
+
+        st.header("🎯 Detection Result")
+
+
+        # ====================================================
+        # YOLO DETECTION
+        # ====================================================
 
         with st.spinner(
-            "Analyzing camera image..."
+            "AI is inspecting the billet surface..."
         ):
 
-            camera_result = model.predict(
-                camera_image,
-                imgsz=960,
-                conf=CONFIDENCE,
-                iou=IOU,
-                verbose=False
-            )[0]
+            try:
 
-        camera_annotated = camera_result.plot()
+                results = model.predict(
+                    source=image,
+                    conf=confidence,
+                    iou=iou,
+                    verbose=False
+                )
 
-        st.subheader(
-            "🔍 Camera Detection Result"
-        )
+            except Exception as error:
+
+                st.error("❌ Detection failed.")
+
+                st.code(str(error))
+
+                st.stop()
+
+
+        # ====================================================
+        # GET RESULT
+        # ====================================================
+
+        result = results[0]
+
+
+        # ====================================================
+        # DRAW DETECTION BOXES
+        # ====================================================
+
+        annotated_image = result.plot()
+
+        # Convert BGR → RGB
+        annotated_image = annotated_image[:, :, ::-1]
+
 
         st.image(
-            camera_annotated,
-            caption="Detected Billet Defects",
-            use_container_width=True
+            annotated_image,
+            caption="YOLO Defect Detection",
+            width="stretch"
         )
+
+
+        # ====================================================
+        # CHECK DETECTIONS
+        # ====================================================
 
         if (
-            camera_result.boxes is not None
-            and len(camera_result.boxes) > 0
+            result.boxes is not None
+            and len(result.boxes) > 0
         ):
 
-            st.success(
-                f"✅ {len(camera_result.boxes)} "
-                "defect(s) detected"
-            )
+            boxes = result.boxes
 
-            st.subheader(
-                "📊 Camera Defect Details"
-            )
-
-            for number, box in enumerate(
-                camera_result.boxes,
-                start=1
-            ):
-
-                class_id = int(box.cls[0])
-                score = float(box.conf[0])
-
-                defect_name = model.names[class_id]
-
-                st.write(
-                    f"**Defect {number}:** "
-                    f"🔴 {defect_name} | "
-                    f"Confidence: "
-                    f"**{score * 100:.2f}%**"
-                )
-
-        else:
 
             st.success(
-                "✅ No trained defect detected."
-            )
-
-# ==========================================================
-# TILED INFERENCE
-# ==========================================================
-
-def tiled_inference(
-    image,
-    tile_size,
-    overlap,
-    confidence,
-    iou
-):
-
-    image_np = np.array(
-        image.convert("RGB")
-    )
-
-    height, width = (
-        image_np.shape[:2]
-    )
-
-    bgr = cv2.cvtColor(
-        image_np,
-        cv2.COLOR_RGB2BGR
-    )
-
-    stride = max(
-        1,
-        int(
-            tile_size
-            * (1 - overlap)
-        )
-    )
-
-
-    x_positions = list(
-        range(
-            0,
-            max(
-                1,
-                width - tile_size + 1
-            ),
-            stride
-        )
-    )
-
-
-    y_positions = list(
-        range(
-            0,
-            max(
-                1,
-                height - tile_size + 1
-            ),
-            stride
-        )
-    )
-
-
-    if (
-        not x_positions
-        or x_positions[-1]
-        + tile_size < width
-    ):
-
-        x_positions.append(
-            max(
-                0,
-                width - tile_size
-            )
-        )
-
-
-    if (
-        not y_positions
-        or y_positions[-1]
-        + tile_size < height
-    ):
-
-        y_positions.append(
-            max(
-                0,
-                height - tile_size
-            )
-        )
-
-
-    boxes = []
-    scores = []
-    class_ids = []
-
-
-    for y in y_positions:
-
-        for x in x_positions:
-
-            tile = bgr[
-                y:min(
-                    y + tile_size,
-                    height
-                ),
-                x:min(
-                    x + tile_size,
-                    width
-                )
-            ]
-
-
-            if tile.size == 0:
-                continue
-
-
-            results = model.predict(
-                tile,
-                imgsz=tile_size,
-                conf=confidence,
-                iou=iou,
-                verbose=False
+                f"✅ {len(boxes)} defect(s) detected."
             )
 
 
-            result = results[0]
+            # =================================================
+            # DETECTION DETAILS
+            # =================================================
+
+            st.subheader("📊 Detection Details")
 
 
-            if result.boxes is None:
-                continue
+            detection_data = []
 
 
-            for box in result.boxes:
+            for index in range(len(boxes)):
 
-                coords = (
-                    box.xyxy[0]
-                    .cpu()
-                    .numpy()
-                )
-
-
-                score = float(
-                    box.conf[0]
-                    .cpu()
-                    .numpy()
-                )
-
-
+                # Class ID
                 class_id = int(
-                    box.cls[0]
-                    .cpu()
-                    .numpy()
+                    boxes.cls[index].item()
                 )
 
 
-                x1, y1, x2, y2 = coords
-
-
-                boxes.append([
-                    float(x1 + x),
-                    float(y1 + y),
-                    float(x2 + x),
-                    float(y2 + y)
-                ])
-
-
-                scores.append(
-                    score
+                # Confidence
+                confidence_value = float(
+                    boxes.conf[index].item()
                 )
 
 
-                class_ids.append(
-                    class_id
-                )
-
-
-    # ======================================================
-    # MERGE OVERLAPPING TILE DETECTIONS
-    # ======================================================
-
-    final_indices = []
-
-
-    if boxes:
-
-        nms_boxes = []
-
-
-        for (
-            x1,
-            y1,
-            x2,
-            y2
-        ) in boxes:
-
-            nms_boxes.append([
-                int(x1),
-                int(y1),
-                int(x2 - x1),
-                int(y2 - y1)
-            ])
-
-
-        indices = cv2.dnn.NMSBoxes(
-            nms_boxes,
-            scores,
-            confidence,
-            iou
-        )
-
-
-        if len(indices) > 0:
-
-            final_indices = (
-                np.array(
-                    indices
-                )
-                .reshape(-1)
-                .tolist()
-            )
-
-
-    detections = []
-
-
-    for index in final_indices:
-
-        detections.append({
-            "class_id":
-                class_ids[index],
-
-            "confidence":
-                scores[index],
-
-            "box":
-                boxes[index]
-        })
-
-
-    return (
-        image_np,
-        detections
-    )
-
-
-# ==========================================================
-# INSPECTION
-# ==========================================================
-
-if uploaded_file is not None:
-
-    image = Image.open(
-        uploaded_file
-    ).convert("RGB")
-
-
-    image_np = np.array(
-        image
-    )
-
-
-    height, width = (
-        image_np.shape[:2]
-    )
-
-
-    st.subheader(
-        "📷 Billet Image"
-    )
-
-
-    col1, col2 = st.columns(2)
-
-
-    with col1:
-
-        st.image(
-            image,
-            caption="Original Image",
-            use_container_width=True
-        )
-
-
-    # ======================================================
-    # RUN INSPECTION
-    # ======================================================
-
-    if st.button(
-        "🔎 Run AI Inspection",
-        type="primary"
-    ):
-
-
-        with st.spinner(
-            "Analyzing billet surface..."
-        ):
-
-
-            # ------------------------------------------------
-            # IMAGE QUALITY
-            # ------------------------------------------------
-
-            gray = cv2.cvtColor(
-                image_np,
-                cv2.COLOR_RGB2GRAY
-            )
-
-
-            sharpness = cv2.Laplacian(
-                gray,
-                cv2.CV_64F
-            ).var()
-
-
-            # ------------------------------------------------
-            # PREDICTION
-            # ------------------------------------------------
-
-            if USE_TILED:
-
-                inspected_image, detections = (
-                    tiled_inference(
-                        image,
-                        TILE_SIZE,
-                        OVERLAP,
-                        CONFIDENCE,
-                        IOU
-                    )
-                )
-
-            else:
-
-                result = model.predict(
-                    image,
-                    imgsz=960,
-                    conf=CONFIDENCE,
-                    iou=IOU,
-                    verbose=False
-                )[0]
-
-
-                inspected_image = (
-                    image_np.copy()
-                )
-
-
-                detections = []
-
-
-                if result.boxes is not None:
-
-                    for box in result.boxes:
-
-                        coords = (
-                            box.xyxy[0]
-                            .cpu()
-                            .numpy()
-                        )
-
-
-                        score = float(
-                            box.conf[0]
-                            .cpu()
-                            .numpy()
-                        )
-
-
-                        class_id = int(
-                            box.cls[0]
-                            .cpu()
-                            .numpy()
-                        )
-
-
-                        detections.append({
-                            "class_id":
-                                class_id,
-
-                            "confidence":
-                                score,
-
-                            "box":
-                                coords.tolist()
-                        })
-
-
-            # ------------------------------------------------
-            # DRAW DETECTIONS
-            # ------------------------------------------------
-
-            annotated = (
-                inspected_image.copy()
-            )
-
-
-            rows = []
-
-
-            for number, detection in enumerate(
-                detections,
-                start=1
-            ):
-
-
-                class_id = (
-                    detection["class_id"]
-                )
-
-
-                confidence = (
-                    detection["confidence"]
-                )
-
-
-                x1, y1, x2, y2 = [
-                    int(v)
-                    for v in detection["box"]
-                ]
-
-
-                x1 = max(
-                    0,
-                    min(
-                        width - 1,
-                        x1
-                    )
-                )
-
-
-                x2 = max(
-                    0,
-                    min(
-                        width - 1,
-                        x2
-                    )
-                )
-
-
-                y1 = max(
-                    0,
-                    min(
-                        height - 1,
-                        y1
-                    )
-                )
-
-
-                y2 = max(
-                    0,
-                    min(
-                        height - 1,
-                        y2
-                    )
-                )
-
-
-                box_width = max(
-                    0,
-                    x2 - x1
-                )
-
-
-                box_height = max(
-                    0,
-                    y2 - y1
-                )
-
-
-                area = (
-                    box_width
-                    * box_height
-                )
-
-
-                if (
-                    0 <= class_id
-                    < len(CLASS_NAMES)
-                ):
-
-                    defect_name = (
-                        CLASS_NAMES[
-                            class_id
-                        ]
+                # Defect name
+                if hasattr(result, "names"):
+
+                    defect_name = result.names.get(
+                        class_id,
+                        f"Class {class_id}"
                     )
 
                 else:
 
-                    defect_name = (
-                        f"Class {class_id}"
-                    )
+                    defect_name = f"Class {class_id}"
 
 
-                # Draw rectangle
-                cv2.rectangle(
-                    annotated,
-                    (x1, y1),
-                    (x2, y2),
-                    (255, 0, 0),
-                    3
+                # Bounding box
+                x1, y1, x2, y2 = (
+                    boxes.xyxy[index].tolist()
                 )
 
 
-                # Label
-                label = (
-                    f"{defect_name} "
-                    f"| {confidence:.3f}"
+                detection_data.append(
+                    {
+                        "No.": index + 1,
+
+                        "Defect": defect_name,
+
+                        "Confidence":
+                            f"{confidence_value * 100:.2f}%",
+
+                        "X1": int(x1),
+
+                        "Y1": int(y1),
+
+                        "X2": int(x2),
+
+                        "Y2": int(y2)
+                    }
                 )
 
 
-                cv2.putText(
-                    annotated,
-                    label,
-                    (
-                        x1,
-                        max(
-                            25,
-                            y1 - 8
-                        )
-                    ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (255, 0, 0),
-                    2,
-                    cv2.LINE_AA
-                )
+            # =================================================
+            # DISPLAY TABLE
+            # =================================================
 
-
-                rows.append({
-
-                    "Defect No.":
-                        number,
-
-                    "Defect":
-                        defect_name,
-
-                    "Model Confidence":
-                        round(
-                            confidence,
-                            4
-                        ),
-
-                    "X1":
-                        x1,
-
-                    "Y1":
-                        y1,
-
-                    "X2":
-                        x2,
-
-                    "Y2":
-                        y2,
-
-                    "Width (px)":
-                        box_width,
-
-                    "Height (px)":
-                        box_height,
-
-                    "Area (px²)":
-                        area
-                })
-
-
-            # ==================================================
-            # RESULT IMAGE
-            # ==================================================
-
-            with col2:
-
-                st.image(
-                    annotated,
-                    caption="AI Inspection Result",
-                    use_container_width=True
-                )
-
-
-            # ==================================================
-            # SUMMARY
-            # ==================================================
-
-            st.divider()
-
-
-            st.subheader(
-                "📊 Inspection Summary"
+            st.dataframe(
+                detection_data,
+                width="stretch",
+                hide_index=True
             )
 
 
-            total_defects = len(
-                rows
-            )
+            # =================================================
+            # DEFECT SUMMARY
+            # =================================================
+
+            st.subheader("📋 Defect Summary")
 
 
-            c1, c2, c3 = st.columns(3)
+            defect_counts = {}
 
 
-            c1.metric(
-                "Detected Defects",
-                total_defects
-            )
+            for detection in detection_data:
+
+                defect_name = detection["Defect"]
+
+                if defect_name not in defect_counts:
+
+                    defect_counts[defect_name] = 0
+
+                defect_counts[defect_name] += 1
 
 
-            c2.metric(
-                "Image Width",
-                f"{width}px"
-            )
+            for defect_name, count in defect_counts.items():
 
-
-            c3.metric(
-                "Image Height",
-                f"{height}px"
-            )
-
-
-            if total_defects == 0:
-
-                st.success(
-                    "No trained defect class was detected "
-                    "above the selected confidence threshold."
+                st.write(
+                    f"🔴 **{defect_name}** — {count}"
                 )
 
 
-            else:
+            # =================================================
+            # HIGHEST CONFIDENCE
+            # =================================================
 
-                st.subheader(
-                    "🔍 Defect Details"
-                )
-
-
-                df = pd.DataFrame(
-                    rows
-                )
-
-
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-
-                # ==================================================
-                # DEFECT COUNTS
-                # ==================================================
-
-                st.subheader(
-                    "📌 Defect Count"
-                )
-
-
-                counts = (
-                    df["Defect"]
-                    .value_counts()
-                    .rename_axis(
-                        "Defect"
-                    )
-                    .reset_index(
-                        name="Count"
-                    )
-                )
-
-
-                st.dataframe(
-                    counts,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-
-                # ==================================================
-                # HIGHEST SCORE
-                # ==================================================
-
-                highest = (
-                    df.sort_values(
-                        "Model Confidence",
-                        ascending=False
-                    )
-                    .iloc[0]
-                )
-
-
-                st.info(
-                    "Highest model-confidence detection: "
-                    f"{highest['Defect']} "
-                    f"({highest['Model Confidence']:.3f})"
-                )
-
-
-                # ==================================================
-                # CSV REPORT
-                # ==================================================
-
-                csv_data = (
-                    df.to_csv(
-                        index=False
-                    )
-                )
-
-
-                st.download_button(
-                    "⬇ Download CSV Inspection Report",
-                    data=csv_data,
-                    file_name=(
-                        "billet_inspection_report.csv"
-                    ),
-                    mime="text/csv"
-                )
-
-
-            # ==================================================
-            # ANNOTATED IMAGE DOWNLOAD
-            # ==================================================
-
-            output = Image.fromarray(
-                annotated
+            highest_confidence = max(
+                boxes.conf.tolist()
             )
 
 
-            buffer = io.BytesIO()
-
-
-            output.save(
-                buffer,
-                format="PNG"
+            st.metric(
+                "Highest Detection Confidence",
+                f"{highest_confidence * 100:.2f}%"
             )
 
 
-            st.download_button(
-                "⬇ Download Annotated Image",
-                data=buffer.getvalue(),
-                file_name=(
-                    "billet_defect_inspection.png"
-                ),
-                mime="image/png"
+        else:
+
+            # =================================================
+            # NO DEFECT
+            # =================================================
+
+            st.success(
+                "✅ No trained defect was detected "
+                "above the selected confidence threshold."
             )
 
 
-            # ==================================================
-            # IMAGE QUALITY
-            # ==================================================
-
-            st.divider()
-
-
-            st.subheader(
-                "🔬 Image Quality"
-            )
-
-
-            st.write(
-                f"Resolution: "
-                f"{width} × {height} pixels"
-            )
-
-
-            st.write(
-                f"Sharpness indicator: "
-                f"{sharpness:.2f}"
-            )
-
-
-            st.caption(
-                "Sharpness is an image-quality indicator only "
-                "and is not an industrial acceptance limit."
-            )
-
-
-# ==========================================================
-# ENGINEERING NOTE
-# ==========================================================
+# ============================================================
+# INFORMATION SECTION
+# ============================================================
 
 st.divider()
 
+with st.expander("ℹ️ About this application"):
 
-st.subheader(
-    "⚠️ Engineering Note"
-)
+    st.write(
+        "This application uses a trained YOLO object-detection "
+        "model to identify surface defects in continuous-casting "
+        "billets."
+    )
+
+    st.write("**Trained defect classes:**")
+
+    st.write(
+        "Scratch, Weld slag, Cutting opening, "
+        "Water slag mark, Slag skin, Longitudinal crack"
+    )
+
+    st.warning(
+        "Model confidence is not the same as guaranteed accuracy. "
+        "The system should be used as an inspection-support tool."
+    )
 
 
-st.write(
-    "This AI system detects the defect classes represented "
-    "in its training dataset. It should not be interpreted "
-    "as detecting every possible billet defect."
-)
+# ============================================================
+# FOOTER
+# ============================================================
 
-
-st.write(
-    "Very small or microscopic defects require sufficient "
-    "image resolution, suitable lighting and representative "
-    "annotated training data."
-)
-
-
-st.write(
-    "Internal or subsurface defects cannot be reliably "
-    "determined from an ordinary surface photograph."
-)
-
+st.divider()
 
 st.caption(
-    "AI-assisted inspection prototype"
-)
-'''
-
-
-# ================================================================
-# 22. SAVE APP
-# ================================================================
-
-APP_PATH = Path(
-    "/content/app.py"
-)
-
-with open(
-    APP_PATH,
-    "w",
-    encoding="utf-8"
-) as f:
-
-    f.write(
-        APP_CODE
-    )
-
-
-# ================================================================
-# 23. CREATE REQUIREMENTS
-# ================================================================
-
-REQUIREMENTS = """streamlit
-ultralytics
-opencv-python-headless
-pillow
-numpy
-pandas
-"""
-
-REQUIREMENTS_PATH = Path(
-    "/content/requirements.txt"
-)
-
-with open(
-    REQUIREMENTS_PATH,
-    "w",
-    encoding="utf-8"
-) as f:
-
-    f.write(
-        REQUIREMENTS
-    )
-
-
-# ================================================================
-# 24. CREATE FINAL PROJECT
-# ================================================================
-
-PROJECT_DIR = Path(
-    "/content/billet_defect_detector"
-)
-
-if PROJECT_DIR.exists():
-
-    shutil.rmtree(
-        PROJECT_DIR
-    )
-
-PROJECT_DIR.mkdir()
-
-
-shutil.copy2(
-    APP_PATH,
-    PROJECT_DIR / "app.py"
-)
-
-
-shutil.copy2(
-    FINAL_MODEL,
-    PROJECT_DIR
-    / "best_billet_defect_model.pt"
-)
-
-
-shutil.copy2(
-    REQUIREMENTS_PATH,
-    PROJECT_DIR
-    / "requirements.txt"
-)
-
-
-shutil.copy2(
-    DATA_YAML,
-    PROJECT_DIR
-    / "dataset.yaml"
-)
-
-
-# ================================================================
-# 25. CREATE README
-# ================================================================
-
-README = """
-# Continuous Casting Billet Defect Detector
-
-AI-assisted billet surface inspection.
-
-## Trained classes
-
-1. Scratch
-2. Weld slag
-3. Cutting opening
-4. Water slag mark
-5. Slag skin
-6. Longitudinal crack
-
-## Features
-
-- YOLO-based defect detection
-- High-resolution tiled inference
-- Defect type
-- Model confidence score
-- Defect location
-- Bounding-box dimensions
-- Defect count
-- CSV inspection report
-- Annotated image
-- Image-quality indicator
-- Unseen test-set evaluation
-
-## Important engineering limitation
-
-The model can detect only classes represented in its training data.
-
-Model confidence is not the same as accuracy or a calibrated probability.
-
-Internal/subsurface defects should not be claimed as detectable
-from an ordinary surface image.
-
-Production deployment requires validation using representative
-plant images and applicable inspection specifications.
-"""
-
-with open(
-    PROJECT_DIR / "README.md",
-    "w",
-    encoding="utf-8"
-) as f:
-
-    f.write(
-        README
-    )
-
-
-# ================================================================
-# 26. CREATE COMPLETE ZIP
-# ================================================================
-
-OUTPUT_BASE = (
-    "/content/billet_defect_detector_complete"
-)
-
-OUTPUT_ZIP = (
-    OUTPUT_BASE + ".zip"
-)
-
-if os.path.exists(
-    OUTPUT_ZIP
-):
-
-    os.remove(
-        OUTPUT_ZIP
-    )
-
-
-shutil.make_archive(
-    OUTPUT_BASE,
-    "zip",
-    PROJECT_DIR
-)
-
-
-# ================================================================
-# 27. FINAL INFORMATION
-# ================================================================
-
-print("\n")
-print("=" * 70)
-print("      COMPLETE BILLET DEFECT DETECTOR READY")
-print("=" * 70)
-
-print("\nDataset:")
-print(
-    "Valid images:",
-    len(valid_pairs)
-)
-
-print(
-    "Training:",
-    len(train_pairs)
-)
-
-print(
-    "Validation:",
-    len(val_pairs)
-)
-
-print(
-    "Unseen test:",
-    len(test_pairs)
-)
-
-print("\nModel:")
-print(
-    "Instance Segmentation"
-    if USE_SEGMENTATION
-    else "Object Detection"
-)
-
-print("\nBest model:")
-print(
-    FINAL_MODEL
-)
-
-print("\nStreamlit app:")
-print(
-    APP_PATH
-)
-
-print("\nComplete project:")
-print(
-    OUTPUT_ZIP
-)
-
-print("\n")
-print("=" * 70)
-print("DOWNLOADING COMPLETE PROJECT")
-print("=" * 70)
-
-
-# ================================================================
-# 28. DOWNLOAD
-# ================================================================
-
-files.download(
-    OUTPUT_ZIP
+    f"Developed by {NAME} | "
+    f"{BRANCH} | "
+    f"{COLLEGE}"
 )
