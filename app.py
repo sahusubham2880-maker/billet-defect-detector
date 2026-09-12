@@ -47,7 +47,6 @@ import yaml
 
 from PIL import Image
 
-from google.colab import files
 from ultralytics import YOLO
 
 
@@ -55,25 +54,12 @@ from ultralytics import YOLO
 # 3. UPLOAD YOUR CASTING BILLET DATASET
 # ================================================================
 
-print("=" * 70)
-print("UPLOAD YOUR CASTING BILLET DATASET ZIP")
-print("=" * 70)
 
-uploaded = files.upload()
 
-zip_files = [
-    x for x in uploaded.keys()
-    if x.lower().endswith(".zip")
-]
 
-if not zip_files:
-    raise RuntimeError(
-        "Please upload your Casting Billet dataset as a ZIP file."
-    )
 
-ZIP_FILE = zip_files[0]
 
-print("Uploaded:", ZIP_FILE)
+
 
 
 # ================================================================
