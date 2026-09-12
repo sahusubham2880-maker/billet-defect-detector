@@ -1116,6 +1116,93 @@ uploaded_file = st.file_uploader(
     ]
 )
 
+# ==========================================================
+# CAMERA INPUT - NEW FEATURE
+# ==========================================================
+
+st.subheader("📷 Camera Inspection")
+
+camera_file = st.camera_input(
+    "Take a picture of the billet surface"
+)
+
+if camera_file is not None:
+
+    camera_image = Image.open(
+        camera_file
+    ).convert("RGB")
+
+    st.image(
+        camera_image,
+        caption="Captured Billet Image",
+        use_container_width=True
+    )
+
+    if st.button(
+        "📷 Run Camera Inspection",
+        type="primary"
+    ):
+
+        with st.spinner(
+            "Analyzing camera image..."
+        ):
+
+            camera_result = model.predict(
+                camera_image,
+                imgsz=960,
+                conf=CONFIDENCE,
+                iou=IOU,
+                verbose=False
+            )[0]
+
+        camera_annotated = camera_result.plot()
+
+        st.subheader(
+            "🔍 Camera Detection Result"
+        )
+
+        st.image(
+            camera_annotated,
+            caption="Detected Billet Defects",
+            use_container_width=True
+        )
+
+        if (
+            camera_result.boxes is not None
+            and len(camera_result.boxes) > 0
+        ):
+
+            st.success(
+                f"✅ {len(camera_result.boxes)} "
+                "defect(s) detected"
+            )
+
+            st.subheader(
+                "📊 Camera Defect Details"
+            )
+
+            for number, box in enumerate(
+                camera_result.boxes,
+                start=1
+            ):
+
+                class_id = int(box.cls[0])
+                score = float(box.conf[0])
+
+                defect_name = model.names[class_id]
+
+                st.write(
+                    f"**Defect {number}:** "
+                    f"🔴 {defect_name} | "
+                    f"Confidence: "
+                    f"**{score * 100:.2f}%**"
+                )
+
+        else:
+
+            st.success(
+                "✅ No trained defect detected."
+            )
 
 # ==========================================================
 # TILED INFERENCE
