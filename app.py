@@ -27,7 +27,7 @@
 # 1. INSTALL LIBRARIES
 # ================================================================
 
-!pip install -q -U ultralytics streamlit opencv-python-headless pillow pandas numpy pyyaml scikit-learn matplotlib
+
 
 
 # ================================================================
